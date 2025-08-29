@@ -64,10 +64,15 @@ def gitlab_webhook():
     project_id = event["project"]["id"]
     mr_iid = event["object_attributes"]["iid"]
 
-    # 1️⃣ Get MR changes
+
+    # 1️⃣ Get MR changes and diff_refs
     url = f"{GITLAB_API}/projects/{project_id}/merge_requests/{mr_iid}/changes"
     headers = {"PRIVATE-TOKEN": GITLAB_TOKEN}
     changes = requests.get(url, headers=headers).json()
+    # Get diff_refs from MR details API
+    mr_url = f"{GITLAB_API}/projects/{project_id}/merge_requests/{mr_iid}"
+    mr_details = requests.get(mr_url, headers=headers).json()
+    diff_refs = mr_details.get("diff_refs", {})
 
     # 2️⃣ Review each file
     for change in changes.get("changes", []):
@@ -78,12 +83,43 @@ def gitlab_webhook():
 
         suggestions = review_diff(file_path, diff)
 
-        # 3️⃣ Post as MR note (summary, not inline for now)
-        note_url = f"{GITLAB_API}/projects/{project_id}/merge_requests/{mr_iid}/notes"
-        payload = {"body": f"🤖 AI Review for `{file_path}`:\n\n{suggestions}"}
-        requests.post(note_url, headers=headers, json=payload)
+        # 3️⃣ Post inline comments as MR discussions
+
+        try:
+            import json, re
+            # Remove code block markers if present
+            suggestions_clean = re.sub(r"^```json|```$", "", suggestions.strip(), flags=re.MULTILINE).strip()
+            suggestions_list = json.loads(suggestions_clean)
+        except Exception as e:
+            print(f"[ERROR] Could not parse suggestions as JSON: {e}\nSuggestions: {suggestions}")
+            # fallback: post as summary note if suggestions are not valid JSON
+            note_url = f"{GITLAB_API}/projects/{project_id}/merge_requests/{mr_iid}/notes"
+            payload = {"body": f"🤖 AI Review for `{file_path}`:\n\n{suggestions}"}
+            requests.post(note_url, headers=headers, json=payload)
+            continue
+
+        for suggestion in suggestions_list:
+            line = suggestion.get("line")
+            comment = suggestion.get("comment")
+            if line is None or not comment:
+                continue
+            discussion_url = f"{GITLAB_API}/projects/{project_id}/merge_requests/{mr_iid}/discussions"
+            discussion_payload = {
+                "body": f"🤖 {comment}",
+                "position": {
+                    "base_sha": diff_refs.get("base_sha"),
+                    "start_sha": diff_refs.get("start_sha"),
+                    "head_sha": diff_refs.get("head_sha"),
+                    "position_type": "text",
+                    "new_path": file_path,
+                    "new_line": line
+                }
+            }
+            resp = requests.post(discussion_url, headers=headers, json=discussion_payload)
+            if resp.status_code >= 400:
+                print(f"[ERROR] Failed to post inline comment: {resp.text}")
 
     return jsonify({"status": "ok"})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=5001)
