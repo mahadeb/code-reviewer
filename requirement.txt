@@ -1,5 +1,5 @@
+langchain>=0.1.0
+openai>=1.0.0
 flask
-gunicorn
 requests
-openai
-
+google-generativeai
